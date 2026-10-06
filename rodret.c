@@ -22,7 +22,15 @@ typedef enum {
     SWD_ERROR_PARITY,
 } swd_error;
 
+typedef enum {
+    DCI_ERROR_WRITE_COMMAND = 19,
+    DCI_ERROR_WRITE_TIMEOUT = 20,
+    DCI_ERROR_READ_TIMEOUT = 21,
+    DCI_RESPONSE_OK        = 22,
+} dci_error;
+
 const uint SWD_RETRY_COUNT = 200;
+const uint DCI_RETRY_COUNT = 1001000;
 
 /// DP addresses
 /// Address of DP read registers
@@ -58,11 +66,29 @@ const uint SWD_RETRY_COUNT = 200;
 /// DCI AP register bank 0
 #define DCI_AP_REG      (0x01000000)
 
+/// DCI register to write command
+#define DCI_WDATA       (0x00001000)
+
+/// DCI register to read response
+#define DCI_RDATA       (0x00001004)
+
+/// DCI register to read status
+#define DCI_STATUS      (0x00001008)
+
+/// Response from the DCI is valid
+#define RDATAVALID      (0x0100)
+
+/// Write Request to the DCI is pending
+#define WPENDING        (0x01)
+
 /// AHB-AP registers
 #define AP_CSW          0
 #define AP_TAR          1
 #define AP_DRW          3
 #define AP_IDR          3       // In bank 0xf
+
+uint32_t cmd_buf[2];   // no argument cmd buffer
+uint32_t cmd_resp[30];
 
 void write_bit_swd(int bit) {
     if (bit > 0) {
@@ -281,7 +307,7 @@ static swd_error write_reg(bool ap, int reg, uint32_t data, bool ignore_ack)
 }
 
 swd_error read_dp(int reg, uint32_t *data) {
-    uint32_t swd_status;
+    uint32_t swd_status = SWD_ERROR_OK;
     uint32_t retry = SWD_RETRY_COUNT;
 
     do {
@@ -296,7 +322,7 @@ swd_error read_dp(int reg, uint32_t *data) {
 
 swd_error write_dp(int reg, uint32_t data)
 {
-  uint32_t swd_status;
+  uint32_t swd_status = SWD_ERROR_OK;
   uint32_t retry = SWD_RETRY_COUNT;
 
   do {
@@ -308,9 +334,24 @@ swd_error write_dp(int reg, uint32_t data)
   return (swd_status);
 }
 
+swd_error read_ap(int reg, uint32_t *data)
+{
+    uint32_t swd_status = SWD_ERROR_OK;
+    uint32_t retry = SWD_RETRY_COUNT;
+
+    do {
+	swd_status = read_reg(true, reg, data);
+	retry--;
+    } while ((swd_status == SWD_ERROR_WAIT) && (retry > 0));
+
+
+    return (swd_status);
+}
+
+
 swd_error write_ap(int reg, uint32_t data)
 {
-  uint32_t swd_status;
+  uint32_t swd_status = SWD_ERROR_OK;
   uint32_t retry = SWD_RETRY_COUNT;
 
   do {
@@ -351,6 +392,97 @@ int connect_to_dci(void) {
     write_ap(AP_CSW, AP_CSW_DEFAULT);
 }
 
+dci_error write_dci_command(uint32_t *command) {
+    // first "word" (4 bytes) is length in bytes including that of the
+    // first word.
+    uint32_t value = 0;
+    uint32_t retry = DCI_RETRY_COUNT;
+    size_t count = command[0] / 4;
+
+    // write command into dci register
+    while (count--) {
+	do {
+	    write_ap(1, DCI_STATUS);
+	    read_ap(3, &value);
+	    read_dp(3, &value);
+	    if ((value & RDATAVALID) != 0) {
+		return (DCI_ERROR_WRITE_COMMAND);
+	    }
+	    retry--;
+	} while (((value & WPENDING) != 0) && (retry > 0));
+
+	if (retry == 0) {
+	    return (DCI_ERROR_WRITE_TIMEOUT);
+	}
+
+	// Write 32-bit command word
+	write_ap(1, DCI_WDATA);
+	write_ap(3, *command++);
+    }
+}
+
+dci_error read_dci_response(uint32_t *resp)
+{
+    uint32_t count;
+    uint32_t retry = DCI_RETRY_COUNT;
+
+    // Poll status to wait RDATAVALID to high
+    do {
+	write_ap(1, DCI_STATUS);
+	read_ap(3, resp);
+	read_dp(3, resp);
+	retry--;
+    } while (((*resp & RDATAVALID) != RDATAVALID) && (retry > 0));
+
+    if (retry == 0) {
+	return (DCI_ERROR_READ_TIMEOUT);
+    }
+
+    // Read the first response word from DCI register
+    write_ap(1, DCI_RDATA);
+    read_ap(3, resp);
+    read_dp(3, resp);
+
+    // Check response code, raise error if not 0
+    if ((*resp >> 16) != 0) {
+	return ((*resp >> 16) + DCI_RESPONSE_OK);
+    }
+
+    // Get the total length of the response word (total in bytes/4)
+    count = (*resp & 0x00ff) >> 2;
+
+    // Read the sequential response words
+    while (--count != 0) {
+	// Poll status to wait RDATAVALID to high
+	resp++;
+	do {
+	    write_ap(1, DCI_STATUS);
+	    read_ap(3, resp);
+	    read_dp(3, resp);
+	    retry--;
+	} while (((*resp & RDATAVALID) != RDATAVALID) && (retry > 0));
+
+	if (retry == 0) {
+	    return (DCI_ERROR_READ_TIMEOUT);
+	}
+
+	// Read 32-bit response word
+	write_ap(1, DCI_RDATA);
+	read_ap(3, resp);
+	read_dp(3, resp);
+    }
+}
+
+void get_status() {
+    // 1. write the GET STATUS command
+    cmd_buf[0] = 0x00000008UL;
+    cmd_buf[1] = 0xFE010000UL;
+    write_dci_command(&cmd_buf[0]);
+
+    // 2. interpret the output and print it.
+    read_dci_response(&cmd_resp[0]);
+}
+
 int disable_secure_debug(void) {
     // write 0x0000_0008, 0x430E_0000 (i.e. overall length (8 bytes,
     // including the first word which is length of 4 bytes) followed
@@ -379,5 +511,7 @@ int main(void) {
     // prepare command buffer for GET_SE_STATUS command. It should
     // show that the secure debug is disabled.
     //
-    // XXX
+    // read section "4.2 DCI Registers", 4.3 in AN1303 and "Get
+    // Status" in section 6.9.
+    get_status();
 }
