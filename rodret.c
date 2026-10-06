@@ -81,11 +81,29 @@ const uint DCI_RETRY_COUNT = 1001000;
 /// Write Request to the DCI is pending
 #define WPENDING        (0x01)
 
+#define ERROR_CODE_MASK         (0xff00)
+#define ERROR_CODE_SHIFT        (8)
+
+#define SECURE_DEBUG_MASK       (0x04)
+#define SECURE_BOOT_MASK        (0x01)
+#define SECURE_BOOT_NOT_CONF    (0xffffffff)
+#define BOOT_STATUS_MASK        (0xff)
+#define BOOT_MAIN_LOOP          (0x20)
+#define DEVICE_ERASE_MASK       (0x02)
+#define DEBUG_LOCK_MASK         (0x01)
+#define DEBUG_LOCK_STATE_MASK   (0x20)
+#define SE_BOOT_ERR_VER         (0x00010020)
+#define SE_VER_MASK             (0x00ffffff)
+#define NO_MCU_VER              (0xffffffff)
+
 /// AHB-AP registers
 #define AP_CSW          0
 #define AP_TAR          1
 #define AP_DRW          3
 #define AP_IDR          3       // In bank 0xf
+
+// response with tamper bits information
+#define RESP_WITH_TAMPER  40
 
 uint32_t cmd_buf[2];   // no argument cmd buffer
 uint32_t cmd_resp[30];
@@ -473,14 +491,126 @@ dci_error read_dci_response(uint32_t *resp)
     }
 }
 
+char *get_error_string(uint32_t code)
+{
+    switch (code) {
+    case SWD_ERROR_OK:
+	return "No error.";
+    case SWD_ERROR_WAIT:
+	return "Timed out while waiting for WAIT response.";
+    case SWD_ERROR_FAULT:
+	return "Target returned FAULT response.";
+    case SWD_ERROR_PROTOCOL:
+	return "Protocol error, target does not respond.";
+    case SWD_ERROR_PARITY:
+	return "Parity error.";
+    default:
+	return "unknown error";
+  }
+}
+
+static void print_se_status(uint32_t *cmd_resp_buf)
+{
+    uint32_t index;
+    uint32_t boot_status;
+    bool boot_error = false;
+
+    // Check response from HSE or VSE
+    if (cmd_resp_buf[0] == RESP_WITH_TAMPER) {
+	index = 5;
+    } else {
+	index = 1;
+    }
+
+    // Save boot status
+    boot_status = cmd_resp_buf[index++];
+
+    // No boot status error code on SE firmware V2
+    if ((cmd_resp_buf[index] & ~SE_VER_MASK) < 0x02000000) {
+	// Boot status error code is available if SE firmware >= v1.2.0
+	if ((cmd_resp_buf[index] & SE_VER_MASK) >= SE_BOOT_ERR_VER) {
+	    boot_error = true;
+	}
+    }
+
+    cmd_resp_buf[index] &= SE_VER_MASK;
+    printf("OK\n");
+    printf("  + SE firmware version  : %08lX\n", cmd_resp_buf[index++]);
+
+    if (cmd_resp_buf[index] != NO_MCU_VER) {
+	printf("  + MCU firmware version : %08lX\n", cmd_resp_buf[index]);
+    } else {
+	printf("  + MCU firmware version : NA\n");
+    }
+
+    index++;
+    printf("  + Debug lock           : ");
+    if (cmd_resp_buf[index] & DEBUG_LOCK_MASK) {
+	printf("Enabled\n");
+    } else {
+	printf("Disabled\n");
+    }
+
+    printf("  + Debug lock state     : ");
+    if (cmd_resp_buf[index] & DEBUG_LOCK_STATE_MASK) {
+	printf("True\n");
+    } else {
+	printf("False\n");
+    }
+
+    printf("  + Device Erase         : ");
+    if (cmd_resp_buf[index] & DEVICE_ERASE_MASK) {
+	printf("Enabled\n");
+    } else {
+	printf("Disabled\n");
+    }
+
+    printf("  + Secure debug         : ");
+    if (cmd_resp_buf[index] & SECURE_DEBUG_MASK) {
+	printf("Enabled\n");
+    } else {
+	printf("Disabled\n");
+    }
+
+    index++;
+    printf("  + Secure boot          : ");
+    if (cmd_resp_buf[index] == SECURE_BOOT_NOT_CONF) {
+	printf("Disabled and SE OTP is not configured\n");
+    } else {
+	if (cmd_resp_buf[index] & SECURE_BOOT_MASK) {
+	    printf("Enabled\n");
+	} else {
+	    printf("Disabled\n");
+	}
+    }
+
+    // Get boot status error code
+    if (boot_error) {
+	index = boot_status;
+	boot_status = ((boot_status & ERROR_CODE_MASK) >> ERROR_CODE_SHIFT) + DCI_RESPONSE_OK;
+	printf("  + Boot status          : %#lx - %s\n",
+	       index & BOOT_STATUS_MASK, get_error_string(boot_status));
+    } else {
+	if ((boot_status & BOOT_STATUS_MASK) != BOOT_MAIN_LOOP) {
+	    printf("  + Boot status          : %#lx - Failed\n",
+		   boot_status & BOOT_STATUS_MASK);
+	} else {
+	    printf("  + Boot status          : %#lx - OK\n",
+		   boot_status & BOOT_STATUS_MASK);
+	}
+    }
+}
+
 void get_status() {
     // 1. write the GET STATUS command
     cmd_buf[0] = 0x00000008UL;
     cmd_buf[1] = 0xFE010000UL;
     write_dci_command(&cmd_buf[0]);
 
-    // 2. interpret the output and print it.
+    // 2. read the response and print it.
     read_dci_response(&cmd_resp[0]);
+
+    print_se_status(&cmd_resp[0]);
 }
 
 int disable_secure_debug(void) {
