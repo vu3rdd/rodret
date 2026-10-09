@@ -108,16 +108,31 @@ const uint DCI_RETRY_COUNT = 1001000;
 uint32_t cmd_buf[2];   // no argument cmd buffer
 uint32_t cmd_resp[30];
 
-void write_bit_swd(int bit) {
-    if (bit > 0) {
-	gpio_put(SWDIO_PIN, 1);
-    } else {
-	gpio_put(SWDIO_PIN, 0);
-    }
+static inline void swd_delay(void) {
+    sleep_us(1);
+}
+
+static inline void swd_clock(void)
+{
+    gpio_put(SWDCLK_PIN, 1);
+    swd_delay();
+    gpio_put(SWDCLK_PIN, 0);
+    swd_delay();
+}
+
+static inline void write_bit_swd(uint32_t bit) {
+    gpio_put(SWDIO_PIN, bit ? 1 : 0);
+    swd_clock();
 }
 
 uint32_t read_bit_swd(void) {
-    return gpio_get(SWDIO_PIN);
+    gpio_put(SWDCLK_PIN, 1);
+    swd_delay();
+    uint32_t bit = gpio_get(SWDIO_PIN);
+    gpio_put(SWDCLK_PIN, 0);
+    swd_delay();
+
+    return bit;
 }
 
 void swdio_set_output(void) {
@@ -129,9 +144,10 @@ void swdio_set_input(void) {
 }
 
 void swdclk_cycle(void) {
-    gpio_put(SWDCLK_PIN, 0);
-    // delay??
     gpio_put(SWDCLK_PIN, 1);
+    swd_delay();
+    gpio_put(SWDCLK_PIN, 0);
+    swd_delay();
 }
 
 void jtag_to_swd_seq(void) {
