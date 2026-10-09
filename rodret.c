@@ -349,9 +349,7 @@ swd_error read_dp(int reg, uint32_t *data) {
 	retry--;
     } while (swd_status == SWD_ERROR_WAIT && retry > 0);
 
-    if (swd_status != SWD_ERROR_OK) {
-	return (swd_status);
-    }
+    return swd_status;
 }
 
 swd_error write_dp(int reg, uint32_t data)
@@ -424,6 +422,8 @@ int connect_to_dci(void) {
 
     // Set transfer size to 32 bit
     write_ap(AP_CSW, AP_CSW_DEFAULT);
+
+    return 0;
 }
 
 dci_error write_dci_command(uint32_t *command) {
