@@ -400,8 +400,12 @@ int connect_to_dci(void) {
     // send jtag to swd sequence via swdio pin.
     jtag_to_swd_seq();
 
+    printf("before read_dp\n");
     // read IDCODE (idcode reg = 0)
-    read_dp(0, &id_code);
+    swd_error err = read_dp(0, &id_code);
+
+    printf("after read_dp\n");
+    printf("err = %d, idcode = %08lx\n", err, id_code);
 
     // verify if id_code is 0x6BA02477
     if (id_code != 0x6BA02477) {
@@ -650,14 +654,27 @@ int main(void) {
 
     gpio_set_dir(LED_PIN, GPIO_OUT);
     gpio_set_dir(SWDCLK_PIN, GPIO_OUT);
+    gpio_set_dir(SWDIO_PIN, GPIO_OUT);
+    gpio_put(SWDCLK_PIN, 0);
 
-    // connect to target and print SE status
-    connect_to_dci();
+    gpio_set_dir(SWDIO_PIN, GPIO_OUT);
+    gpio_put(SWDIO_PIN, 1);
 
-    // prepare command buffer for GET_SE_STATUS command. It should
-    // show that the secure debug is disabled.
-    //
-    // read section "4.2 DCI Registers", 4.3 in AN1303 and "Get
-    // Status" in section 6.9.
-    get_status();
+    sleep_ms(1000);
+    printf("pico started\n");
+
+    for(;;) {
+	printf("attempting to connect...\n");
+	// connect to target and print SE status
+	connect_to_dci();
+
+	// prepare command buffer for GET_SE_STATUS command. It should
+	// show that the secure debug is disabled.
+	//
+	// read section "4.2 DCI Registers", 4.3 in AN1303 and "Get
+	// Status" in section 6.9.
+
+	// get_status();
+	sleep_ms(100);
+    }
 }
